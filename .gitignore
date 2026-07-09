@@ -1,0 +1,18 @@
+/.venv
+*__pycache__
+/Model-Deployment/snapshots
+/Model-Deployment/detections.db
+/Model-Deployment/settings.json
+/Model-Deployment/instance_counter.json
+*.pyc
+bugs.txt
+
+# Local test videos and detection outputs (large / personal footage)
+*.mp4
+*.mkv
+*.avi
+*.mov
+*_detected.mp4
+
+# macOS
+.DS_Store
