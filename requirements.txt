@@ -5,3 +5,4 @@ ultralytics
 Pillow
 python-socketio
 eventlet
+lapx

@@ -173,9 +173,40 @@
         }
 
         .instance-id {
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+
+        .person-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 12px;
             font-size: 13px;
             font-weight: 600;
+            background: rgba(74, 144, 226, 0.12);
+            color: var(--accent-blue);
+        }
+
+        .modal-info {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            font-weight: 500;
             color: var(--text-primary);
+        }
+
+        .modal-info i {
+            color: var(--accent-blue);
+            margin-right: 6px;
         }
 
         .compliance-badge {
@@ -534,7 +565,9 @@
                     grid.innerHTML = data.map(instance => {
                         const timestamp = new Date(instance.first_detected);
                         const timeString = timestamp.toLocaleString();
-                        
+                        const personLabel = (instance.person_id !== null && instance.person_id !== undefined)
+                            ? ('#' + instance.person_id) : '—';
+
                         let detectedPPE = '';
                         if (instance.detected_ppe.length > 0 && instance.detected_ppe[0] !== '') {
                             detectedPPE = `
@@ -563,15 +596,18 @@
                             <div class="instance-card">
                                 <div class="instance-content">
                                     <div class="instance-header">
-                                        <div class="instance-id">
-                                            ${instance.instance_id}
+                                        <div class="person-badge">
+                                            <i class="fas fa-user"></i> Person ${personLabel}
                                         </div>
                                         <div class="compliance-badge non-compliant">
                                             <i class="fas fa-times-circle"></i> Non-Compliant
                                         </div>
                                     </div>
+                                    <div class="instance-id">
+                                        <i class="fas fa-hashtag"></i> ${instance.instance_id}
+                                    </div>
                                     <div class="instance-time">
-                                        <i class="fas fa-clock"></i> ${timeString}
+                                        <i class="fas fa-clock"></i> Violation time: ${timeString}
                                     </div>
                                     <div class="instance-time">
                                         <i class="fas fa-images"></i> ${instance.snapshot_count} snapshot(s)
@@ -620,6 +656,17 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data && data.snapshots && data.snapshots.length > 0) {
+                        const personLabel = (data.person_id !== null && data.person_id !== undefined)
+                            ? ('#' + data.person_id) : '—';
+                        const violationTime = data.first_detected
+                            ? new Date(data.first_detected).toLocaleString() : '—';
+                        const infoBlock = `
+                            <div class="modal-info">
+                                <div><i class="fas fa-user"></i> Person ID: <strong>${personLabel}</strong></div>
+                                <div><i class="fas fa-clock"></i> Violation time: <strong>${violationTime}</strong></div>
+                            </div>
+                        `;
+
                         let detectedPPE = '';
                         if (data.detected_ppe.length > 0 && data.detected_ppe[0] !== '') {
                             detectedPPE = `
@@ -645,6 +692,7 @@
                         }
 
                         modalBody.innerHTML = `
+                            ${infoBlock}
                             <div class="ppe-info" style="margin-bottom: 20px;">
                                 ${detectedPPE}
                                 ${missingPPE}

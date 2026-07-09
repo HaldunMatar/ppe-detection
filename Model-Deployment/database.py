@@ -1,6 +1,15 @@
 import sqlite3
 from datetime import datetime
 import os
+import re
+
+
+def _extract_person_id(instance_id, stored):
+    """Person id: use the stored value, else parse it from a record id like MM_DD_YYYY_P3_7."""
+    if stored is not None:
+        return stored
+    match = re.search(r'_P(\d+)_', instance_id or '')
+    return int(match.group(1)) if match else None
 
 DATABASE = 'detections.db'
 
@@ -24,9 +33,16 @@ class Database:
                     last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
                     is_compliant BOOLEAN DEFAULT 0,
                     missing_ppe TEXT,
-                    detected_ppe TEXT
+                    detected_ppe TEXT,
+                    person_id INTEGER
                 )
             ''')
+
+            # add person_id to databases created before this column existed
+            try:
+                c.execute('ALTER TABLE instances ADD COLUMN person_id INTEGER')
+            except sqlite3.OperationalError:
+                pass  # column already exists
             
             c.execute('''
                 CREATE TABLE IF NOT EXISTS snapshots (
@@ -53,21 +69,21 @@ class Database:
         except Exception as e:
             print(f"Error initializing database: {e}")
     
-    def log_instance_snapshot(self, instance_id, missing_ppe, detected_ppe, snapshot_path):
+    def log_instance_snapshot(self, instance_id, missing_ppe, detected_ppe, snapshot_path, person_id=None):
         """Log a snapshot for an instance"""
         try:
             if not instance_id or not snapshot_path:
                 return False
-            
+
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
-            
+
             c.execute('SELECT id FROM instances WHERE instance_id = ?', (instance_id,))
             if not c.fetchone():
                 c.execute('''
-                    INSERT INTO instances (instance_id, is_compliant, missing_ppe, detected_ppe)
-                    VALUES (?, ?, ?, ?)
-                ''', (instance_id, False, ','.join(missing_ppe), ','.join(detected_ppe)))
+                    INSERT INTO instances (instance_id, is_compliant, missing_ppe, detected_ppe, person_id)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (instance_id, False, ','.join(missing_ppe), ','.join(detected_ppe), person_id))
                 print(f"Created new instance record: {instance_id}")
             else:
                 c.execute('''
@@ -137,32 +153,33 @@ class Database:
             c = conn.cursor()
             
             query = '''
-                SELECT i.*, COUNT(s.id) as snapshot_count
+                SELECT i.instance_id, i.first_detected, i.last_updated, i.is_compliant,
+                       i.missing_ppe, i.detected_ppe, i.person_id, COUNT(s.id) as snapshot_count
                 FROM instances i
                 LEFT JOIN snapshots s ON i.instance_id = s.instance_id
                 WHERE i.is_compliant = 0
                 GROUP BY i.instance_id
             '''
-            
+
             query += f' ORDER BY i.{sort_by} {sort_order}'
-            
+
             c.execute(query)
             rows = c.fetchall()
             conn.close()
-            
+
             instances = []
             for row in rows:
                 instances.append({
-                    'id': row[0],
-                    'instance_id': row[1],
-                    'first_detected': row[2],
-                    'last_updated': row[3],
-                    'is_compliant': bool(row[4]),
-                    'missing_ppe': row[5].split(',') if row[5] else [],
-                    'detected_ppe': row[6].split(',') if row[6] else [],
+                    'instance_id': row[0],
+                    'first_detected': row[1],
+                    'last_updated': row[2],
+                    'is_compliant': bool(row[3]),
+                    'missing_ppe': row[4].split(',') if row[4] else [],
+                    'detected_ppe': row[5].split(',') if row[5] else [],
+                    'person_id': _extract_person_id(row[0], row[6]),
                     'snapshot_count': row[7]
                 })
-            
+
             return instances
         except Exception as e:
             print(f"Error getting instances: {e}")
@@ -197,6 +214,8 @@ class Database:
                 'last_updated': instance_row[3],
                 'missing_ppe': instance_row[5].split(',') if instance_row[5] else [],
                 'detected_ppe': instance_row[6].split(',') if instance_row[6] else [],
+                'person_id': _extract_person_id(instance_row[1],
+                                                instance_row[7] if len(instance_row) > 7 else None),
                 'snapshots': [{'path': row[0], 'timestamp': row[1]} for row in snapshot_rows]
             }
         except Exception as e:

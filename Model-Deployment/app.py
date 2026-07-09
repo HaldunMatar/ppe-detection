@@ -11,6 +11,7 @@ import threading
 import time
 from PIL import Image
 from detection_logic import InstanceDetector, ComplianceChecker, SnapshotManager
+from person_tracker import PersonViolationTracker, build_detections, draw_violation_box
 from database import Database
 import json
 
@@ -27,6 +28,7 @@ db = Database()
 instance_detector = InstanceDetector()
 compliance_checker = ComplianceChecker()
 snapshot_manager = SnapshotManager()
+person_tracker = PersonViolationTracker()
 
 SETTINGS_FILE = 'settings.json'
 DEFAULT_SETTINGS = {
@@ -37,7 +39,8 @@ DEFAULT_SETTINGS = {
     },
     'non_compliance_delay': 3,
     'instance_reset_timeout': 5,
-    'detection_mode': 'single'  # 'single' or 'multi'
+    'detection_mode': 'single',  # 'single' or 'multi'
+    'person_cooldown': 60  # seconds before the SAME person is recorded again
 }
 
 def load_settings():
@@ -92,69 +95,75 @@ def generate_frames():
                 time.sleep(0.1)
                 continue
             
-            results = model(frame)
-            
-            all_detections = []
-            for result in results:
-                boxes = result.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf[0])
-                    cls = int(box.cls[0])
-                    class_name = model.names[cls]
-                    
-                    all_detections.append({
-                        'class': class_name,
-                        'confidence': conf,
-                        'bbox': [int(x1), int(y1), int(x2), int(y2)]
-                    })
-            
-            instance_result = instance_detector.process_detection(all_detections, dev_mode, current_settings)
-            is_compliant = compliance_checker.check_compliance(instance_result, dev_mode)
-            
-            annotated_frame = results[0].plot()
-            
+            results = model.track(frame, persist=True, verbose=False)
+            result = results[0]
+
+            detections = build_detections(result)
             current_time = time.time()
-            
-            if instance_result['should_capture'] and (current_time - last_snapshot_time) >= SNAPSHOT_INTERVAL:
-                snapshot_filename = instance_detector.get_next_snapshot_filename()
-                if snapshot_filename:
-                    snapshot_path = snapshot_manager.save_snapshot(frame, snapshot_filename)
-                    
+            person_results = person_tracker.process(detections, now=current_time)
+
+            annotated_frame = result.plot()
+
+            any_violation = False
+            for pr in person_results:
+                if pr['is_violation']:
+                    any_violation = True
+                    draw_violation_box(annotated_frame, pr)
+
+            has_person = len(person_results) > 0
+            is_compliant = not any_violation
+
+            # one record per person per cooldown window, saved with the red box on that person
+            for pr in person_results:
+                if pr['should_record']:
+                    snapshot = annotated_frame.copy()
+                    snapshot_path = snapshot_manager.save_snapshot(snapshot, pr['record_id'])
                     if snapshot_path:
                         db.log_instance_snapshot(
-                            instance_id=instance_result['instance_id'],
-                            missing_ppe=instance_result['missing_ppe'],
-                            detected_ppe=instance_result['detected_ppe'],
-                            snapshot_path=snapshot_path
+                            instance_id=pr['record_id'],
+                            missing_ppe=pr['missing_ppe'],
+                            detected_ppe=pr['detected_ppe'],
+                            snapshot_path=snapshot_path,
+                            person_id=pr['track_id']
                         )
-                        last_snapshot_time = current_time
-            
-            if not is_compliant and instance_result['has_person']:
+                        db.log_alert(
+                            "NON_COMPLIANCE",
+                            f"Person {pr['track_id']} missing: {', '.join(pr['missing_ppe'])}",
+                            snapshot_path
+                        )
+                        socketio.emit('alert', {
+                            'timestamp': datetime.now().isoformat(),
+                            'type': 'NON_COMPLIANCE',
+                            'description': f"Person {pr['track_id']} missing {', '.join(pr['missing_ppe'])}",
+                            'person_id': pr['track_id'],
+                            'record_id': pr['record_id'],
+                            'dev_mode': dev_mode
+                        })
+
+            if any_violation:
                 overlay = annotated_frame.copy()
-                cv2.rectangle(overlay, (0, 0), (annotated_frame.shape[1], annotated_frame.shape[0]), 
+                cv2.rectangle(overlay, (0, 0), (annotated_frame.shape[1], annotated_frame.shape[0]),
                              (0, 0, 255), 20)
                 annotated_frame = cv2.addWeighted(annotated_frame, 0.8, overlay, 0.2, 0)
-                
+
                 alert_text = "DEV MODE - TESTING" if dev_mode else "NON-COMPLIANT DETECTED"
-                cv2.putText(annotated_frame, alert_text, 
+                cv2.putText(annotated_frame, alert_text,
                            (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                
-                if current_time - last_alert_time > ALERT_COOLDOWN:
-                    db.log_alert("NON_COMPLIANCE", "PPE non-compliance detected", None)
-                    
-                    socketio.emit('alert', {
-                        'timestamp': datetime.now().isoformat(),
-                        'type': 'NON_COMPLIANCE',
-                        'description': 'PPE non-compliance detected',
-                        'dev_mode': dev_mode
-                    })
-                    last_alert_time = current_time
-            
+
             socketio.emit('detection_update', {
                 'timestamp': datetime.now().isoformat(),
                 'is_compliant': is_compliant,
-                'detection_details': instance_result,
+                'person_count': len(person_results),
+                'violations': [
+                    {'person_id': pr['track_id'], 'missing_ppe': pr['missing_ppe']}
+                    for pr in person_results if pr['is_violation']
+                ],
+                'detection_details': {
+                    'has_person': has_person,
+                    'is_compliant': is_compliant,
+                    'missing_ppe': sorted({m for pr in person_results for m in pr['missing_ppe']}),
+                    'detected_ppe': sorted({d for pr in person_results for d in pr['detected_ppe']})
+                },
                 'dev_mode': dev_mode
             })
             
@@ -200,8 +209,9 @@ def update_settings():
     try:
         new_settings = request.json
         current_settings = new_settings
-        
+
         instance_detector.update_settings(new_settings)
+        person_tracker.update_settings(new_settings)
         
         if save_settings_to_file(new_settings):
             return jsonify({'status': 'success', 'message': 'Settings saved'})
@@ -217,6 +227,7 @@ def reset_settings():
     try:
         current_settings = DEFAULT_SETTINGS.copy()
         instance_detector.update_settings(current_settings)
+        person_tracker.update_settings(current_settings)
         
         if save_settings_to_file(current_settings):
             return jsonify({'status': 'success', 'message': 'Settings reset to defaults', 'settings': current_settings})
@@ -348,6 +359,7 @@ if __name__ == '__main__':
         db.init_db()
         load_model()
         instance_detector.update_settings(current_settings)
+        person_tracker.update_settings(current_settings)
         socketio.run(app, debug=True, host='localhost', port=3333, allow_unsafe_werkzeug=True)
     except Exception as e:
         print(f"Fatal error starting app: {e}")
