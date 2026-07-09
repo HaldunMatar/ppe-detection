@@ -158,6 +158,16 @@
             box-shadow: var(--shadow-lg);
         }
 
+        .instance-thumb {
+            width: 100%;
+            height: 180px;
+            object-fit: cover;
+            background: var(--bg-primary);
+            cursor: pointer;
+            display: block;
+            border-bottom: 1px solid var(--border-color);
+        }
+
         .instance-content {
             padding: 16px;
             display: flex;
@@ -592,8 +602,14 @@
                             `;
                         }
 
+                        const thumb = instance.snapshot_path
+                            ? `<img src="/${instance.snapshot_path}" class="instance-thumb" alt="Violation snapshot"
+                                    onclick="window.open('/${instance.snapshot_path}', '_blank')">`
+                            : '';
+
                         return `
                             <div class="instance-card">
+                                ${thumb}
                                 <div class="instance-content">
                                     <div class="instance-header">
                                         <div class="person-badge">

@@ -34,15 +34,28 @@ class Database:
                     is_compliant BOOLEAN DEFAULT 0,
                     missing_ppe TEXT,
                     detected_ppe TEXT,
-                    person_id INTEGER
+                    person_id INTEGER,
+                    snapshot_path TEXT
                 )
             ''')
 
-            # add person_id to databases created before this column existed
-            try:
-                c.execute('ALTER TABLE instances ADD COLUMN person_id INTEGER')
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            # add columns to databases created before they existed
+            for column, coltype in (('person_id', 'INTEGER'), ('snapshot_path', 'TEXT')):
+                try:
+                    c.execute(f'ALTER TABLE instances ADD COLUMN {column} {coltype}')
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+
+            # backfill snapshot_path for older records from their first snapshot
+            c.execute('''
+                UPDATE instances
+                SET snapshot_path = (
+                    SELECT snapshot_path FROM snapshots
+                    WHERE snapshots.instance_id = instances.instance_id
+                    ORDER BY id ASC LIMIT 1
+                )
+                WHERE snapshot_path IS NULL
+            ''')
             
             c.execute('''
                 CREATE TABLE IF NOT EXISTS snapshots (
@@ -81,9 +94,9 @@ class Database:
             c.execute('SELECT id FROM instances WHERE instance_id = ?', (instance_id,))
             if not c.fetchone():
                 c.execute('''
-                    INSERT INTO instances (instance_id, is_compliant, missing_ppe, detected_ppe, person_id)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (instance_id, False, ','.join(missing_ppe), ','.join(detected_ppe), person_id))
+                    INSERT INTO instances (instance_id, is_compliant, missing_ppe, detected_ppe, person_id, snapshot_path)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (instance_id, False, ','.join(missing_ppe), ','.join(detected_ppe), person_id, snapshot_path))
                 print(f"Created new instance record: {instance_id}")
             else:
                 c.execute('''
@@ -154,7 +167,8 @@ class Database:
             
             query = '''
                 SELECT i.instance_id, i.first_detected, i.last_updated, i.is_compliant,
-                       i.missing_ppe, i.detected_ppe, i.person_id, COUNT(s.id) as snapshot_count
+                       i.missing_ppe, i.detected_ppe, i.person_id, i.snapshot_path,
+                       COUNT(s.id) as snapshot_count
                 FROM instances i
                 LEFT JOIN snapshots s ON i.instance_id = s.instance_id
                 WHERE i.is_compliant = 0
@@ -177,7 +191,8 @@ class Database:
                     'missing_ppe': row[4].split(',') if row[4] else [],
                     'detected_ppe': row[5].split(',') if row[5] else [],
                     'person_id': _extract_person_id(row[0], row[6]),
-                    'snapshot_count': row[7]
+                    'snapshot_path': row[7],
+                    'snapshot_count': row[8]
                 })
 
             return instances
@@ -216,6 +231,7 @@ class Database:
                 'detected_ppe': instance_row[6].split(',') if instance_row[6] else [],
                 'person_id': _extract_person_id(instance_row[1],
                                                 instance_row[7] if len(instance_row) > 7 else None),
+                'snapshot_path': instance_row[8] if len(instance_row) > 8 else None,
                 'snapshots': [{'path': row[0], 'timestamp': row[1]} for row in snapshot_rows]
             }
         except Exception as e:
